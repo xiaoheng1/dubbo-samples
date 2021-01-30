@@ -16,6 +16,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# constants
+ERROR_MSG_FLAG=":ErrorMsg:"
+
+
 PRG="$0"
 PRGDIR=`dirname "$PRG"`
 [ -z "$SCENARIO_HOME" ] && SCENARIO_HOME=`cd "$PRGDIR" >/dev/null; pwd`
@@ -77,7 +81,7 @@ function redirect_container_logs() {
     return 0
   fi
 
-  container_id=`docker ps -qf "name=${container_name}"`
+  container_id=`docker ps -aqf "name=${container_name}"`
   if [[ -z "${container_id}" ]]; then
     return 1
   fi
@@ -102,6 +106,17 @@ function wait_container_exit() {
   while [ 1 = 1 ];
   do
     sleep 2
+    duration=$(( SECONDS - start ))
+    if [ $duration -gt $timeout ];then
+      echo "wait for container is timeout: $duration s"
+      return 1
+    fi
+
+    container_id=`docker ps -aqf "name=${container_name}"`
+    if [[ -z "${container_id}" ]]; then
+      continue
+    fi
+
     status=`docker inspect $container_name --format='{{.State.Status}}'`
     # test container may pending start cause by depends_on condition
 #    result=$?
@@ -113,11 +128,6 @@ function wait_container_exit() {
         return 0
     fi
 
-    duration=$(( SECONDS - start ))
-    if [ $duration -gt $timeout ];then
-      echo "wait for container is timeout: $duration s"
-      return 1
-    fi
   done
 }
 
@@ -151,7 +161,7 @@ docker-compose -p ${project_name} -f ${compose_file} up -d 2>&1 <<< "NNN" | tee 
 sleep 5
 
 # test container may pending start cause by depends_on condition
-#container_id=`docker ps -qf "name=${container_name}"`
+#container_id=`docker ps -aqf "name=${container_name}"`
 #if [[ -z "${container_id}" ]]; then
 #    echo "[$scenario_name] docker startup failure!" | tee -a $scenario_log
 #    status=1
@@ -167,16 +177,22 @@ sleep 5
             echo "[$scenario_name] Run tests successfully" | tee -a $scenario_log
         else
             status=$result
-            echo "[$scenario_name] Run tests failed" | tee -a $scenario_log
+            echo "[$scenario_name] $ERROR_MSG_FLAG Run tests failed" | tee -a $scenario_log
         fi
     else
         status=1
-        echo "[$scenario_name] Run tests timeout" | tee -a $scenario_log
+        echo "[$scenario_name] $ERROR_MSG_FLAG Run tests timeout" | tee -a $scenario_log
+    fi
+
+    if [[ "$debug_mode" == "1" ]]; then
+      echo "[$scenario_name] Waiting for debugging .." | tee -a $scenario_log
+      echo "[$scenario_name] Please type 'Ctrl + C' or run the script './kill-tests.sh' to end debugging .." | tee -a $scenario_log
+      # idle waiting for abort from user
+      read -r -d '' _ </dev/tty
     fi
 
     echo "[$scenario_name] Stopping containers .." | tee -a $scenario_log
     docker-compose -p ${project_name} -f ${compose_file} kill 2>&1 | tee -a $scenario_log > /dev/null
-    docker wait ${container_name} > /dev/null
 #fi
 
 if [[ $status == 0 ]];then
@@ -184,9 +200,14 @@ if [[ $status == 0 ]];then
     ${removeImagesScript}
 else
     for service_name in ${service_names[@]};do
-        echo "docker inspect ${project_name}_${service_name}_1 :"
-        docker inspect ${project_name}_${service_name}_1 >> $scenario_log
-        echo ""
+        service_container_name=${project_name}_${service_name}_1
+        docker wait $service_container_name > /dev/null
+
+        echo "docker inspect $service_container_name  :" >> $scenario_log
+        docker inspect $service_container_name >> $scenario_log
+        echo "" >> $scenario_log
+
+        docker logs -f $service_container_name &> $SCENARIO_HOME/logs/${service_name}.log
     done
 fi
 
